@@ -1,33 +1,39 @@
 use std::{
     collections::{HashMap, HashSet},
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 
 use anyhow::{Context, Result};
+use clap::{arg, command, ArgAction, Parser, ValueEnum};
 use syn::{visit::Visit, Attribute, File, ItemMod, Meta, UseTree};
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, ValueEnum)]
 enum Grouping {
+    #[default]
     File,
     Module,
 }
-fn read_args() -> (PathBuf, Grouping) {
-    let mut root = PathBuf::from(".");
-    let mut grouping = Grouping::File;
-    for arg in env::args().skip(1) {
-        match arg.as_str() {
-            "module" | "--module" => grouping = Grouping::Module,
-            "file" | "--file" => grouping = Grouping::File,
-            _ if root == PathBuf::from(".") => root = PathBuf::from(arg),
-            other => {
-                eprintln!("unrecognised arg: {other}");
-                std::process::exit(1);
-            }
-        }
-    }
-    (root, grouping)
+
+/// Command-line interface
+///
+/// * `DIR` is the folder to analyse (defaults to `.`)  
+/// * `--module` / `--file` let you switch the grouping; the first one
+///   wins if both are given (mimics the hand-rolled parser)
+#[derive(Debug, Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Folder to analyse
+    root: PathBuf,
+
+    /// Group by *module* instead of by file  
+    /// (same as the bare `module` token in the legacy parser)
+    #[arg(long, action = ArgAction::SetTrue, alias = "module")]
+    module: bool,
+
+    #[arg(value_enum, long, default_value_t = Grouping::default(), alias = "grouping")]
+    mode: Grouping,
 }
 
 #[derive(Default)]
@@ -224,8 +230,8 @@ fn find_mod_file(parent_file: &Path, ident: &str) -> Option<PathBuf> {
 }
 
 fn main() -> Result<()> {
-    let (crate_root_cli, grouping) = read_args();
-    let crate_root = fs::canonicalize(&crate_root_cli).unwrap_or_else(|_| crate_root_cli.clone());
+    let cli = Cli::parse();
+    let crate_root = fs::canonicalize(&cli.root).unwrap_or_else(|_| cli.root.clone());
 
     let root_rs = ["src/lib.rs", "src/main.rs"]
         .into_iter()
@@ -247,7 +253,7 @@ fn main() -> Result<()> {
         let mut v = Collector {
             file_path: file_path.clone(),
             mod_path,
-            grouping,
+            grouping: cli.mode,
             root: &crate_root,
             in_test: false,
             graph: &mut graph,
