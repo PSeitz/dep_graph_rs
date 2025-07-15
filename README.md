@@ -1,6 +1,7 @@
-# Rust Dependency Graph Generator
+# dep_graph_rs
 
-This tool generates a dependency graph for the internal modules of a Rust crate.
+`dep_graph_rs` generates a dependency graph for the internal modules of a Rust crate.
+
 It uses the [`syn`](https://github.com/dtolnay/syn) crate to parse Rust source code and 
 analyzes `use crate::...` statements to build a directed graph of dependencies between modules or files. 
 The graph is then output in the [DOT](https://graphviz.org/doc/info/lang.html) language.
@@ -9,7 +10,8 @@ The graph is then output in the [DOT](https://graphviz.org/doc/info/lang.html) l
 
 ## Example
 
-One of the main motivations for this tool is to assist with large-scale refactoring.
+One of the main motivations for this tool is to assist refactoring and understand dependencies.
+
 My use case is to analyze the dependencies of a module before extracting it into a separate crate.
 In this case, extracting `tantivy/src/directory` into a new `tantivy-directory` crate.
 
@@ -64,5 +66,11 @@ You can render the generated `graph.dot` file in a few ways:
 For example, to only show dependencies originating from the `graphics` module:
 
 ```bash
-dep_graph_rs ./test_proj1 --source "^graphics" > graph.dot
+dep_graph_rs ./test_proj1 --source "graphics" > graph.dot
 ```
+
+## TODO
+
+- [ ] Better support `*` imports
+- [ ] Plain Output for cli usage
+- [ ] Go more into `rust_analyzer` territory, e.g. find_references etc.?
