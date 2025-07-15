@@ -1,14 +1,18 @@
 [package]
+authors = ["Pascal Seitz <pascal.seitz@gmail.com>"]
 name = "dep_graph_rs"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Generate a dependency graph for modules of a Rust project"
+keywords = ["dependencies", "module", "mod", "graph", "dot"]
+homepage = "https://github.com/pseitz/dep_graph_rs"
+repository = "https://github.com/pseitz/dep_graph_rs"
+readme = "README.md"
+license = "MIT"
+include = ["src/*.rs", "src/frame/**/*", "src/block/**/*", "README.md", "LICENSE"]
 
 [dependencies]
 anyhow = "1.0.98"
 clap = { version = "4.5.41", features = ["derive"] }
 regex = "1.11.1"
-#regex = "1.11.1"
 syn = { version = "2", features = ["full", "visit"] }
-#walkdir = "2.5.0"

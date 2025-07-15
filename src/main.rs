@@ -99,16 +99,12 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
             return;
         }
         // entry: must be `Path(ident="crate", subtree)`
-        if let syn::UseTree::Path(crate_path) = &u.tree {
-            if crate_path.ident == "crate" {
-                let imports = collect_after_crate(&crate_path.tree);
-                for (seg, item) in imports {
-                    if let Some(to_filename) = self.module_files.get(&seg) {
-                        let from = rel(&self.file_path, self.root);
-                        let to = rel(to_filename, self.root);
-                        self.graph.add(from.clone(), to.clone(), item);
-                    }
-                }
+        let imports = collect_crate_imports(u);
+        for (seg, item) in imports {
+            if let Some(to_filename) = self.module_files.get(&seg) {
+                let from = rel(&self.file_path, self.root);
+                let to = rel(to_filename, self.root);
+                self.graph.add(from.clone(), to.clone(), item);
             }
         }
 
@@ -155,6 +151,15 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
             self.files_to_scan.push((new_path, filename));
         }
     }
+}
+
+fn collect_crate_imports(u: &syn::ItemUse) -> Vec<(String, String)> {
+    if let syn::UseTree::Path(crate_path) = &u.tree {
+        if crate_path.ident == "crate" {
+            return collect_after_crate(&crate_path.tree);
+        }
+    }
+    Vec::new()
 }
 
 /// Given `use crate::…`, pull out exactly the (module, item) pairs:
@@ -292,7 +297,7 @@ mod tests {
         collections::HashMap,
         path::{Path, PathBuf},
     };
-    use syn::File;
+    use syn::{File, ItemUse};
 
     /// Parse `code`, run your Collector exactly once, and return the resulting Graph.
     fn graph_from_str(code: &str, module_files: &mut HashMap<String, PathBuf>) -> Graph {
@@ -351,7 +356,7 @@ mod tests {
     #[test]
     fn test_collect_crate_imports_simple_path() {
         // `use crate::mod2::foo;` → [("mod2","foo")]
-        let tree: UseTree = syn::parse_str("crate::mod2::foo").unwrap();
+        let tree: ItemUse = syn::parse_str("use crate::mod2::foo;").unwrap();
         let got = collect_crate_imports(&tree);
         let want = vec![("mod2".to_string(), "foo".to_string())];
         assert_eq!(got, want);
@@ -360,7 +365,7 @@ mod tests {
     #[test]
     fn test_collect_crate_imports_grouped_same_mod() {
         // `use crate::mod2::{a,b,c};` → [("mod2","a"),("mod2","b"),("mod2","c")]
-        let tree: UseTree = syn::parse_str("crate::mod2::{a,b,c}").unwrap();
+        let tree: ItemUse = syn::parse_str("use crate::mod2::{a,b,c};").unwrap();
         let mut got = collect_crate_imports(&tree);
         got.sort();
         let mut want = vec![
@@ -375,7 +380,7 @@ mod tests {
     #[test]
     fn test_collect_crate_imports_multi_group() {
         // `use crate::{m1::x, m2::y};` → [("m1","x"),("m2","y")]
-        let tree: UseTree = syn::parse_str("crate::{m1::x, m2::y}").unwrap();
+        let tree: ItemUse = syn::parse_str("use crate::{m1::x, m2::y};").unwrap();
         let mut got = collect_crate_imports(&tree);
         got.sort();
         let mut want = vec![
