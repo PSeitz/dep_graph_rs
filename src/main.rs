@@ -20,8 +20,8 @@ enum Grouping {
 }
 
 /// Represents a filter for the edges in the graph.
-#[derive(Args, Debug)]
-#[group(required = true, multiple = false)]
+#[derive(Args, Debug, Default)]
+#[group(multiple = true, required = false)]
 pub struct Filter {
     /// If set, only show edges that match this source filter.
     /// This is a substring match.
@@ -53,7 +53,7 @@ struct Cli {
     /// If set, only show edges that match this source filter.
     /// This is a substring match.
     #[command(flatten)]
-    filter: Filter,
+    filter: Option<Filter>,
 }
 
 fn is_cfg_test(attrs: &[Attribute]) -> bool {
@@ -232,7 +232,7 @@ fn main() -> Result<()> {
         crate_root.clone()
     };
 
-    let mut graph = Graph::new(cli.mode, cli.filter);
+    let mut graph = Graph::new(cli.mode, cli.filter.unwrap_or_default());
 
     let mut module_files = HashMap::<String, PathBuf>::new();
     let mut files_to_scan = vec![(vec!["crate".into()], root_rs)];
@@ -281,7 +281,7 @@ mod tests {
     fn graph_from_str(code: &str, module_files: &mut HashMap<String, PathBuf>) -> Graph {
         let root = Path::new(".");
         let file_path = PathBuf::from("lib.rs");
-        let mut graph = Graph::new(Grouping::File);
+        let mut graph = Graph::new(Grouping::File, Filter::default());
         let mut files_to_scan = Vec::new();
 
         let mut collector = Collector {
