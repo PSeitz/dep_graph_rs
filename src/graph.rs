@@ -40,7 +40,33 @@ impl Graph {
         }
     }
 
-    fn normalize(&mut self) {
+    fn apply_filter(&mut self) {
+        self.edges = self
+            .edges
+            .iter()
+            .filter(|((src, dst), reasons)| {
+                if let Some(ref src_filt) = self.filter.source {
+                    if !src.contains(src_filt) {
+                        return false;
+                    }
+                }
+                if let Some(ref dst_filt) = self.filter.destination {
+                    if !dst.contains(dst_filt) {
+                        return false;
+                    }
+                }
+                if let Some(ref item_filt) = self.filter.item {
+                    if !reasons.iter().any(|r| r.contains(item_filt)) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+    }
+
+    fn apply_grouping(&mut self) {
         if self.mode == Grouping::Module {
             // normalize the edges to use module paths
             let mut new_edges: HashMap<(String, String), HashSet<String>> = HashMap::new();
@@ -57,12 +83,18 @@ impl Graph {
     }
 
     pub fn dump_dot(&mut self) {
-        self.normalize();
+        self.apply_grouping();
+        self.apply_filter();
         // collect every vertex and bucket it by its root segment
         let mut clusters: HashMap<String, HashSet<String>> = HashMap::new();
         for (src, dst) in self.edges.keys() {
+            let seperator = if self.mode == Grouping::Module {
+                "::"
+            } else {
+                "/"
+            };
             for v in [src, dst] {
-                if let Some(root) = v.split("::").next() {
+                if let Some(root) = v.split(seperator).next() {
                     clusters
                         .entry(root.to_string())
                         .or_default()
@@ -89,7 +121,7 @@ impl Graph {
         let mut clusters_sorted: Vec<_> = clusters.iter().collect();
         clusters_sorted.sort_by_key(|(root, _)| root.to_string());
         for (root, verts) in &clusters_sorted {
-            println!("  subgraph cluster_{root} {{");
+            println!("  subgraph \"cluster_{root}\" {{");
             println!("    label=\"{root}\";");
             println!("    style=rounded;"); // nice rounded box
             for v in *verts {
@@ -108,7 +140,7 @@ impl Graph {
             let mut check_extra = |src: &str, arrow: &str| {
                 let src_root = root_of(src).unwrap_or_else(|| src.to_string());
                 if clusters.contains_key(&src_root) {
-                    extra.push_str(&format!(",{arrow}=cluster_{src_root}"));
+                    extra.push_str(&format!(",{arrow}=\"cluster_{src_root}\""));
                 }
             };
             //check_extra(src, "ltail");

@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use clap::{arg, command, Parser, ValueEnum};
+use clap::{arg, command, Args, Parser, ValueEnum};
 use syn::{visit::Visit, Attribute, File, ItemMod, Meta, UseTree};
 
 use crate::graph::Graph;
@@ -20,16 +20,21 @@ enum Grouping {
 }
 
 /// Represents a filter for the edges in the graph.
+#[derive(Args, Debug)]
+#[group(required = true, multiple = false)]
 pub struct Filter {
     /// If set, only show edges that match this source filter.
     /// This is a substring match.
+    #[arg(long)]
     source: Option<String>,
     /// If set, only show edges that match this destination filter.
     /// This is a substring match.
+    #[arg(long)]
     destination: Option<String>,
     /// If set, only show edges that match this item filter.
     /// e.g. a function name.
     /// This is a substring match.
+    #[arg(long)]
     item: Option<String>,
 }
 
@@ -47,16 +52,8 @@ struct Cli {
 
     /// If set, only show edges that match this source filter.
     /// This is a substring match.
-    filter_source: Option<String>,
-
-    /// If set, only show edges that match this destination filter.
-    /// This is a substring match.
-    filter_destination: Option<String>,
-
-    /// If set, only show edges that match this item filter.
-    /// e.g. a function name.
-    /// This is a substring match.
-    filter_item: Option<String>,
+    #[command(flatten)]
+    filter: Filter,
 }
 
 fn is_cfg_test(attrs: &[Attribute]) -> bool {
@@ -235,12 +232,7 @@ fn main() -> Result<()> {
         crate_root.clone()
     };
 
-    let filter = Filter {
-        source: cli.filter_source,
-        destination: cli.filter_destination,
-        item: cli.filter_item,
-    };
-    let mut graph = Graph::new(cli.mode, filter);
+    let mut graph = Graph::new(cli.mode, cli.filter);
 
     let mut module_files = HashMap::<String, PathBuf>::new();
     let mut files_to_scan = vec![(vec!["crate".into()], root_rs)];
