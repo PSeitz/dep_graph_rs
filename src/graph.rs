@@ -6,7 +6,7 @@ use std::{
 use crate::{file_path_to_mod_path, Grouping};
 
 pub struct Graph {
-    edges: HashMap<(String, String), HashSet<String>>,
+    pub edges: HashMap<(String, String), HashSet<String>>,
     mode: Grouping,
 }
 
