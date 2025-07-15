@@ -41,24 +41,32 @@ impl Graph {
     }
 
     fn apply_filter(&mut self) {
-        self.edges = self
-            .edges
-            .iter()
-            .filter(|((src, dst), reasons)| {
+        let mut filtered_edges = self.edges.clone();
+
+        for ((_src, _dst), items) in &mut filtered_edges {
+            if let Some(ref item_filt) = self.filter.item {
+                *items = items
+                    .iter()
+                    .filter(|why| item_filt.is_match(why))
+                    .cloned()
+                    .collect::<HashSet<_>>();
+            }
+        }
+        self.edges = filtered_edges
+            .into_iter()
+            .filter(|((src, dst), items)| {
                 if let Some(ref src_filt) = self.filter.source {
-                    if !src.contains(src_filt) {
+                    if !src_filt.is_match(src) {
                         return false;
                     }
                 }
                 if let Some(ref dst_filt) = self.filter.destination {
-                    if !dst.contains(dst_filt) {
+                    if !dst_filt.is_match(dst) {
                         return false;
                     }
                 }
-                if let Some(ref item_filt) = self.filter.item {
-                    if !reasons.iter().any(|r| r.contains(item_filt)) {
-                        return false;
-                    }
+                if self.filter.item.is_some() && items.is_empty() {
+                    return false; // Filter out edges with no reasons
                 }
                 true
             })

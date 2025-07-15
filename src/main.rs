@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::{arg, command, Args, Parser, ValueEnum};
+use regex::Regex;
 use syn::{visit::Visit, Attribute, File, ItemMod, Meta, UseTree};
 
 use crate::graph::Graph;
@@ -24,18 +25,34 @@ enum Grouping {
 #[group(multiple = true, required = false)]
 pub struct Filter {
     /// If set, only show edges that match this source filter.
-    /// This is a substring match.
-    #[arg(long)]
-    source: Option<String>,
+    /// This is a Regex, but if it contains no regex‑special characters,
+    /// it is treated as exact match and surrounded with `^…$`.
+    #[arg(long, value_parser = parse_regex)]
+    source: Option<Regex>,
     /// If set, only show edges that match this destination filter.
-    /// This is a substring match.
-    #[arg(long)]
-    destination: Option<String>,
+    /// This is a Regex, but if it contains no regex‑special characters,
+    /// it is treated as exact match and surrounded with `^…$`.
+    #[arg(long, value_parser = parse_regex)]
+    destination: Option<Regex>,
     /// If set, only show edges that match this item filter.
     /// e.g. a function name.
-    /// This is a substring match.
-    #[arg(long)]
-    item: Option<String>,
+    /// This is a Regex, but if it contains no regex‑special characters,
+    /// it is treated as exact match and surrounded with `^…$`.
+    #[arg(long, value_parser = parse_regex)]
+    item: Option<Regex>,
+}
+
+fn parse_regex(src: &str) -> Result<Regex, String> {
+    // if the user didn’t supply any regex‑special characters,
+    // treat it as a literal and anchor it as “^…$”
+    let is_plain = !src.chars().any(|c| ".*+?^$()[]{}\\".contains(c));
+    let pat = if is_plain {
+        format!("^{}$", regex::escape(src))
+    } else {
+        src.to_owned()
+    };
+
+    Regex::new(&pat).map_err(|e| e.to_string())
 }
 
 /// Command-line interface

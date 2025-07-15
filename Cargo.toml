@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.98"
 clap = { version = "4.5.41", features = ["derive"] }
+regex = "1.11.1"
 #regex = "1.11.1"
 syn = { version = "2", features = ["full", "visit"] }
 #walkdir = "2.5.0"
