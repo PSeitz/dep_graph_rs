@@ -66,7 +66,7 @@ impl Graph {
                     }
                 }
                 if self.filter.item.is_some() && items.is_empty() {
-                    return false; // Filter out edges with no reasons
+                    return false;
                 }
                 true
             })
@@ -76,7 +76,6 @@ impl Graph {
 
     fn apply_grouping(&mut self) {
         if self.mode == Grouping::Module {
-            // normalize the edges to use module paths
             let mut new_edges: HashMap<(String, String), HashSet<String>> = HashMap::new();
             for ((src, dst), whys) in self.edges.drain() {
                 let src_mod = file_path_to_mod_path(&PathBuf::from(&src));
@@ -93,16 +92,17 @@ impl Graph {
     pub fn dump_dot(&mut self) {
         self.apply_grouping();
         self.apply_filter();
-        // collect every vertex and bucket it by its root segment
+
+        // build clusters by root segment
         let mut clusters: HashMap<String, HashSet<String>> = HashMap::new();
+        let sep = if self.mode == Grouping::Module {
+            "::"
+        } else {
+            "/"
+        };
         for (src, dst) in self.edges.keys() {
-            let seperator = if self.mode == Grouping::Module {
-                "::"
-            } else {
-                "/"
-            };
             for v in [src, dst] {
-                if let Some(root) = v.split(seperator).next() {
+                if let Some(root) = v.split(sep).next() {
                     clusters
                         .entry(root.to_string())
                         .or_default()
@@ -111,55 +111,77 @@ impl Graph {
             }
         }
 
-        let config = r#"
+        let palette: Vec<(&str, &str)> = get_palette();
+
+        let header = r#"
  graph [rankdir=LR];
- node [shape=box, style=rounded];
- edge [fontname="Courier New", fontsize=10];
+ edge [fontname="Courier New", fontsize=8, color="\#555"];
  graph  [fontname="Helvetica", fontsize=12];
- node   [shape=box,   fontname="Helvetica", fontsize=12];
- edge   [fontname="Helvetica", fontsize=8, color="\#555"];
-"#;
+ node [
+    shape=box
+    style=filled
+    fontname="Helvetica"
+    fontsize=12
+    fillcolor="white"
+    color="\#555"
+ ];
+ "#;
 
         println!("digraph internal_deps {{");
-        println!("{config}");
-        println!("  compound=true;"); // allow edges into clusters
+        println!("{header}");
+        println!("  compound=true;");
         println!("  node [shape=box];");
 
-        // 1. emit the clusters (boxes)
-        let mut clusters_sorted: Vec<_> = clusters.iter().collect();
-        clusters_sorted.sort_by_key(|(root, _)| root.to_string());
-        for (root, verts) in &clusters_sorted {
+        // emit beautiful colored clusters
+        let mut sorted: Vec<_> = clusters.iter().collect();
+        sorted.sort_by_key(|(r, _)| r.to_string());
+        for (i, (root, verts)) in sorted.iter().enumerate() {
+            let (border, fill) = palette[i % palette.len()];
             println!("  subgraph \"cluster_{root}\" {{");
             println!("    label=\"{root}\";");
-            println!("    style=rounded;"); // nice rounded box
+            println!("    style=\"rounded,filled\";");
+            println!("    color=\"{border}\";");
+            println!("    fillcolor=\"{fill}\";");
             for v in *verts {
                 println!("    \"{v}\";");
             }
             println!("  }}");
         }
 
-        //dbg!(&self.0);
-        // 2. emit the labelled edges
-        let mut sorted_edges: Vec<_> = self.edges.iter().collect();
-        sorted_edges.sort_by_key(|((src, dst), _)| (src.to_string(), dst.to_string()));
-        for ((src, dst), whys) in &sorted_edges {
-            let label = Self::get_edge_label(whys);
+        // emit edges
+        let mut edges: Vec<_> = self.edges.iter().collect();
+        edges.sort_by_key(|((s, d), _)| (s.clone(), d.clone()));
+        for ((src, dst), whys) in edges {
+            let lbl = Self::get_edge_label(whys);
             let mut extra = String::new();
-            let mut check_extra = |src: &str, arrow: &str| {
-                let src_root = root_of(src).unwrap_or_else(|| src.to_string());
-                if clusters.contains_key(&src_root) {
-                    extra.push_str(&format!(",{arrow}=\"cluster_{src_root}\""));
+            if let Some(root) = root_of(dst) {
+                if clusters.contains_key(&root) {
+                    extra.push_str(&format!(",lhead=\"cluster_{root}\""));
                 }
-            };
-            //check_extra(src, "ltail");
-            check_extra(dst, "lhead");
-            println!("  \"{src}\" -> \"{dst}\" [label=\"{label}\" {extra}];");
+            }
+            println!("  \"{src}\" -> \"{dst}\" [label=\"{lbl}\"{extra}];");
         }
+
         println!("}}");
     }
 }
 
-/// "crate::aggregation::..."  →  "aggregation"
+/// "crate::aggregation::..." → "aggregation"
 fn root_of(s: &str) -> Option<String> {
     s.split("::").next().map(|s| s.to_string())
+}
+
+fn get_palette() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("#1f77b4", "#c6dbef"), // blue
+        ("#ff7f0e", "#ffe7c6"), // orange
+        ("#2ca02c", "#c6efcd"), // green
+        ("#d62728", "#f4c6c6"), // red
+        ("#9467bd", "#e8d6ef"), // purple
+        ("#8c564b", "#e9d6ca"), // brown
+        ("#e377c2", "#f7d6e9"), // pink
+        ("#7f7f7f", "#d6d6d6"), // grey
+        ("#bcbd22", "#ecebc6"), // olive
+        ("#17becf", "#c6eef0"), // cyan
+    ]
 }
