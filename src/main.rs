@@ -2,101 +2,34 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
 };
 
 use anyhow::{Context, Result};
-use clap::{arg, command, ArgAction, Parser, ValueEnum};
+use clap::{arg, command, Parser, ValueEnum};
 use syn::{visit::Visit, Attribute, File, ItemMod, Meta, UseTree};
 
-#[derive(Debug, Default, Clone, Copy, ValueEnum)]
+use crate::graph::Graph;
+
+mod graph;
+
+#[derive(Debug, Default, Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum Grouping {
-    #[default]
     File,
+    #[default]
     Module,
 }
 
 /// Command-line interface
 ///
-/// * `DIR` is the folder to analyse (defaults to `.`)  
-/// * `--module` / `--file` let you switch the grouping; the first one
-///   wins if both are given (mimics the hand-rolled parser)
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Folder to analyse
+    /// Either a path to a crate root (`src/lib.rs` or `src/main.rs`) or a path to a file.
     root: PathBuf,
 
-    /// Group by *module* instead of by file  
-    /// (same as the bare `module` token in the legacy parser)
-    #[arg(long, action = ArgAction::SetTrue, alias = "module")]
-    module: bool,
-
     #[arg(value_enum, long, default_value_t = Grouping::default(), alias = "grouping")]
+    /// Group the output by file or by module.
     mode: Grouping,
-}
-
-#[derive(Default)]
-struct Graph(HashMap<(String, String), HashSet<String>>);
-
-impl Graph {
-    fn add(&mut self, from: String, to: String, why: String) {
-        if from != to {
-            self.0.entry((from, to)).or_default().insert(why);
-        }
-    }
-
-    fn get_edge_label(whys: &HashSet<String>) -> String {
-        if whys.len() > 3 {
-            let mut iter = whys.iter().take(3);
-            let mut label = iter.next().unwrap().clone();
-            for why in iter {
-                label.push_str("\\n");
-                label.push_str(why);
-            }
-            label.push_str("\\n…");
-            label
-        } else {
-            whys.iter().cloned().collect::<Vec<_>>().join("\\n")
-        }
-    }
-
-    fn dump_dot(&self) {
-        // collect every vertex and bucket it by its root segment
-        let mut clusters: HashMap<String, HashSet<String>> = HashMap::new();
-        for (src, dst) in self.0.keys() {
-            for v in [src, dst] {
-                if let Some(root) = v.strip_prefix("crate::").and_then(|s| s.split("::").next()) {
-                    clusters
-                        .entry(root.to_string())
-                        .or_default()
-                        .insert(v.clone());
-                }
-            }
-        }
-
-        println!("digraph internal_deps {{");
-        println!("  compound=true;"); // allow edges into clusters
-        println!("  node [shape=box];");
-
-        // 1. emit the clusters (boxes)
-        for (root, verts) in &clusters {
-            println!("  subgraph cluster_{root} {{");
-            println!("    label=\"{root}\";");
-            println!("    style=rounded;"); // nice rounded box
-            for v in verts {
-                println!("    \"{v}\";");
-            }
-            println!("  }}");
-        }
-
-        // 2. emit the labelled edges
-        for ((src, dst), whys) in &self.0 {
-            let label = Self::get_edge_label(whys);
-            println!("  \"{src}\" -> \"{dst}\" [label=\"{label}\"];");
-        }
-        println!("}}");
-    }
 }
 
 fn is_cfg_test(attrs: &[Attribute]) -> bool {
@@ -112,11 +45,10 @@ fn is_cfg_test(attrs: &[Attribute]) -> bool {
 struct Collector<'g, 'w> {
     file_path: PathBuf,
     mod_path: Vec<String>,
-    grouping: Grouping,
     root: &'g Path,
     in_test: bool,
     graph: &'g mut Graph,
-    worklist: &'w mut Vec<(Vec<String>, PathBuf)>,
+    files_to_scan: &'w mut Vec<(Vec<String>, PathBuf)>,
     module_files: &'g mut HashMap<String, PathBuf>,
 }
 
@@ -128,15 +60,9 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
         if let UseTree::Path(p) = &u.tree {
             if p.ident == "crate" {
                 if let Some(seg) = first_segment(&p.tree) {
-                    if let Some(target_fp) = self.module_files.get(&seg) {
-                        let from = match self.grouping {
-                            Grouping::File => rel(&self.file_path, self.root),
-                            Grouping::Module => self.mod_path.join("::"),
-                        };
-                        let to = match self.grouping {
-                            Grouping::File => rel(target_fp, self.root),
-                            Grouping::Module => format!("crate::{seg}"),
-                        };
+                    if let Some(to_filename) = self.module_files.get(&seg) {
+                        let from = rel(&self.file_path, self.root);
+                        let to = rel(to_filename, self.root);
                         for item in imported_items(&p.tree) {
                             self.graph.add(from.clone(), to.clone(), item);
                         }
@@ -156,7 +82,8 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
         let mut new_path = self.mod_path.clone();
         new_path.push(m.ident.to_string());
 
-        // inline module
+        // inline module is a module that has no `mod.rs` file, but
+        // instead has its content in the same file
         if let Some((_, items)) = &m.content {
             if self.mod_path.len() == 1 {
                 self.module_files
@@ -165,11 +92,10 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
             let mut inner = Collector {
                 file_path: self.file_path.clone(),
                 mod_path: new_path,
-                grouping: self.grouping,
                 root: self.root,
                 in_test: this_is_test,
                 graph: self.graph,
-                worklist: self.worklist,
+                files_to_scan: self.files_to_scan,
                 module_files: self.module_files,
             };
             for it in items {
@@ -178,12 +104,13 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
             return;
         }
 
-        // outline module
-        if let Some(fp) = find_mod_file(&self.file_path, &m.ident.to_string()) {
+        // a module that has its content in a separate file
+        if let Some(filename) = find_mod_file(&self.file_path, &m.ident.to_string()) {
             if self.mod_path.len() == 1 {
-                self.module_files.insert(m.ident.to_string(), fp.clone());
+                self.module_files
+                    .insert(m.ident.to_string(), filename.clone());
             }
-            self.worklist.push((new_path, fp));
+            self.files_to_scan.push((new_path, filename));
         }
     }
 }
@@ -207,8 +134,7 @@ fn imported_items(tree: &UseTree) -> Vec<String> {
         Rename(r) => vec![r.rename.to_string()],
         Path(p) => imported_items(&p.tree),
         Group(g) => g.items.iter().flat_map(imported_items).collect(),
-        // We ignore * imports, as they don't contain specific items
-        Glob(_) => vec![],
+        Glob(_) => vec!["*".to_string()],
     }
 }
 
@@ -217,6 +143,17 @@ fn rel(p: &Path, root: &Path) -> String {
         .unwrap_or(p)
         .to_string_lossy()
         .into_owned()
+}
+
+pub fn file_path_to_mod_path(file_path: &Path) -> String {
+    let file_path = file_path.to_string_lossy();
+    let file_path = if let Some(pos) = file_path.rfind("/mod.rs") {
+        file_path[..pos].to_string()
+    } else {
+        file_path.to_string()
+    };
+
+    file_path.replace('/', "::").replace(".rs", "")
 }
 
 fn find_mod_file(parent_file: &Path, ident: &str) -> Option<PathBuf> {
@@ -231,20 +168,27 @@ fn find_mod_file(parent_file: &Path, ident: &str) -> Option<PathBuf> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let crate_root = fs::canonicalize(&cli.root).unwrap_or_else(|_| cli.root.clone());
+    let mut crate_root = fs::canonicalize(&cli.root).unwrap_or_else(|_| cli.root.clone());
 
-    let root_rs = ["src/lib.rs", "src/main.rs"]
-        .into_iter()
-        .map(|p| crate_root.join(p))
-        .find(|p| p.exists())
-        .context("cannot find src/lib.rs or src/main.rs")?;
+    let root_rs = if crate_root.is_dir() {
+        let root_rs = ["src/lib.rs", "src/main.rs"]
+            .into_iter()
+            .map(|p| crate_root.join(p))
+            .find(|p| p.exists())
+            .context("cannot find src/lib.rs or src/main.rs")?;
+        crate_root = crate_root.join("src");
+        root_rs
+    } else {
+        crate_root.clone()
+    };
 
-    let mut graph = Graph::default();
+    let mut graph = Graph::new(cli.mode);
     let mut module_files = HashMap::<String, PathBuf>::new();
-    let mut worklist = vec![(vec!["crate".into()], root_rs)];
+    let mut files_to_scan = vec![(vec!["crate".into()], root_rs)];
 
-    while let Some((mod_path, file_path)) = worklist.pop() {
-        if visited(&file_path) {
+    let mut visited_files = HashSet::new();
+    while let Some((mod_path, file_path)) = files_to_scan.pop() {
+        if visited(&file_path, &mut visited_files) {
             continue;
         }
         let code = fs::read_to_string(&file_path)?;
@@ -253,11 +197,10 @@ fn main() -> Result<()> {
         let mut v = Collector {
             file_path: file_path.clone(),
             mod_path,
-            grouping: cli.mode,
             root: &crate_root,
             in_test: false,
             graph: &mut graph,
-            worklist: &mut worklist,
+            files_to_scan: &mut files_to_scan,
             module_files: &mut module_files,
         };
         v.visit_file(&ast);
@@ -268,12 +211,7 @@ fn main() -> Result<()> {
 }
 
 /// global seen-file set
-fn visited(p: &Path) -> bool {
-    static SEEN: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    let mut set = SEEN
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .unwrap();
+fn visited(p: &Path, visited: &mut HashSet<PathBuf>) -> bool {
     let canon = fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    !set.insert(canon)
+    !visited.insert(canon)
 }
