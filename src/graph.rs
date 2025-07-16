@@ -113,9 +113,9 @@ impl Graph {
 
         let palette: Vec<(&str, &str)> = get_palette();
 
-        let header = r#"
+        let header = r##"
  graph [rankdir=LR];
- edge [fontname="Courier New", fontsize=8, color="\#555"];
+ edge [fontname="Courier New", fontsize=8, color="#555"];
  graph  [fontname="Helvetica", fontsize=12];
  node [
     shape=box
@@ -123,9 +123,9 @@ impl Graph {
     fontname="Helvetica"
     fontsize=12
     fillcolor="white"
-    color="\#555"
+    color="#555"
  ];
- "#;
+ "##;
 
         println!("digraph internal_deps {{");
         println!("{header}");
