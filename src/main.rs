@@ -45,7 +45,7 @@ pub struct Filter {
 fn parse_regex(src: &str) -> Result<Regex, String> {
     // if the user didn’t supply any regex‑special characters,
     // treat it as a literal and anchor it as “^…$”
-    let is_plain = !src.chars().any(|c| ".*+?^$()[]{}\\".contains(c));
+    let is_plain = !src.chars().any(|c| "|.*+?^$()[]{}\\".contains(c));
     let pat = if is_plain {
         format!("^{}$", regex::escape(src))
     } else {
