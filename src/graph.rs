@@ -47,7 +47,15 @@ impl Graph {
             if let Some(ref item_filt) = self.filter.item {
                 *items = items
                     .iter()
-                    .filter(|why| item_filt.is_match(why))
+                    .filter(|why| {
+                        item_filt.is_match(why)
+                            || self
+                                .filter
+                                .filter
+                                .clone()
+                                .map(|f| f.is_match(why))
+                                .unwrap_or(true)
+                    })
                     .cloned()
                     .collect::<HashSet<_>>();
             }
@@ -55,15 +63,8 @@ impl Graph {
         self.edges = filtered_edges
             .into_iter()
             .filter(|((src, dst), items)| {
-                if let Some(ref src_filt) = self.filter.source {
-                    if !src_filt.is_match(src) {
-                        return false;
-                    }
-                }
-                if let Some(ref dst_filt) = self.filter.destination {
-                    if !dst_filt.is_match(dst) {
-                        return false;
-                    }
+                if !self.filter.is_match(src, dst) {
+                    return false;
                 }
                 if self.filter.item.is_some() && items.is_empty() {
                     return false;

@@ -24,22 +24,56 @@ enum Grouping {
 #[derive(Args, Debug, Default)]
 #[group(multiple = true, required = false)]
 pub struct Filter {
+    /// If set, only show edges where source, destination, or item
+    /// match the filter.
+    ///
+    /// This is a Regex, but if it contains no regex‑special characters,
+    /// it is treated as exact match and surrounded with `^…$`.
+    #[arg(long, short, value_parser = parse_regex)]
+    filter: Option<Regex>,
+
     /// If set, only show edges that match this source filter.
     /// This is a Regex, but if it contains no regex‑special characters,
     /// it is treated as exact match and surrounded with `^…$`.
-    #[arg(long, value_parser = parse_regex)]
+    #[arg(long, short, value_parser = parse_regex)]
     source: Option<Regex>,
     /// If set, only show edges that match this destination filter.
     /// This is a Regex, but if it contains no regex‑special characters,
     /// it is treated as exact match and surrounded with `^…$`.
-    #[arg(long, value_parser = parse_regex)]
+    #[arg(long, short, value_parser = parse_regex)]
     destination: Option<Regex>,
     /// If set, only show edges that match this item filter.
     /// e.g. a function name.
     /// This is a Regex, but if it contains no regex‑special characters,
     /// it is treated as exact match and surrounded with `^…$`.
-    #[arg(long, value_parser = parse_regex)]
+    #[arg(long, short, value_parser = parse_regex)]
     item: Option<Regex>,
+}
+
+impl Filter {
+    /// Check if the edge matches this filter.
+    pub fn is_match(&self, src: &str, dst: &str) -> bool {
+        // Special case: if no filter is set, everything matches
+        if self.filter.is_none()
+            && self.source.is_none()
+            && self.destination.is_none()
+            && self.item.is_none()
+        {
+            return true;
+        }
+        // OR-combine the filters
+        let mut matches = false;
+        if let Some(ref filter) = self.filter {
+            matches |= filter.is_match(src) || filter.is_match(dst);
+        }
+        if let Some(ref src_filter) = self.source {
+            matches |= src_filter.is_match(src);
+        }
+        if let Some(ref dst_filter) = self.destination {
+            matches |= dst_filter.is_match(dst);
+        }
+        matches
+    }
 }
 
 fn parse_regex(src: &str) -> Result<Regex, String> {
@@ -247,7 +281,7 @@ fn main() -> Result<()> {
             .into_iter()
             .map(|p| crate_root.join(p))
             .find(|p| p.exists())
-            .context("cannot find src/lib.rs or src/main.rs")?;
+            .context("cannot find src/lib.rs or src/main.rs. You can also point to a file directly as starting point.")?;
         crate_root = crate_root.join("src");
         root_rs
     } else {
