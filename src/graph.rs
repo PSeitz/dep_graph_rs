@@ -40,42 +40,32 @@ impl Graph {
         }
     }
 
-    fn apply_filter(&mut self) {
-        let mut filtered_edges = self.edges.clone();
-
-        for ((_src, _dst), items) in &mut filtered_edges {
+    pub fn apply_filter(&mut self) {
+        for ((_src, _dst), items) in &mut self.edges {
             if let Some(ref item_filt) = self.filter.item {
-                *items = items
-                    .iter()
-                    .filter(|why| {
-                        item_filt.is_match(why)
-                            || self
-                                .filter
-                                .filter
-                                .clone()
-                                .map(|f| f.is_match(why))
-                                .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect::<HashSet<_>>();
+                items.retain(|why| {
+                    item_filt.is_match(why)
+                        || self
+                            .filter
+                            .filter
+                            .clone()
+                            .map(|f| f.is_match(why))
+                            .unwrap_or(false)
+                });
             }
         }
-        self.edges = filtered_edges
-            .into_iter()
-            .filter(|((src, dst), items)| {
-                if !self.filter.is_match(src, dst) {
-                    return false;
-                }
-                if self.filter.item.is_some() && items.is_empty() {
-                    return false;
-                }
-                true
-            })
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        self.edges.retain(|(src, dst), items| {
+            if !self.filter.is_match(src, dst) {
+                return false;
+            }
+            if self.filter.item.is_some() && items.is_empty() {
+                return false;
+            }
+            true
+        });
     }
 
-    fn apply_grouping(&mut self) {
+    pub fn apply_grouping(&mut self) {
         if self.mode == Grouping::Module {
             let mut new_edges: HashMap<(String, String), HashSet<String>> = HashMap::new();
             for ((src, dst), whys) in self.edges.drain() {
@@ -91,9 +81,6 @@ impl Graph {
     }
 
     pub fn dump_dot(&mut self) {
-        self.apply_grouping();
-        self.apply_filter();
-
         // build clusters by root segment
         let mut clusters: HashMap<String, HashSet<String>> = HashMap::new();
         let sep = if self.mode == Grouping::Module {
@@ -168,6 +155,7 @@ impl Graph {
 }
 
 /// "crate::aggregation::..." → "aggregation"
+/// "super::aggregation::..." → "aggregation"
 fn root_of(s: &str) -> Option<String> {
     s.split("::").next().map(|s| s.to_string())
 }
