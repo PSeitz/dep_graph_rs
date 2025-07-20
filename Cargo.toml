@@ -1,15 +1,15 @@
 [package]
 authors = ["Pascal Seitz <pascal.seitz@gmail.com>"]
 name = "dep_graph_rs"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
-description = "Generate a dependency graph for modules of a Rust project"
+description = "Visualize/analyze a Rust crate's internal dependencies"
 keywords = ["dependencies", "module", "mod", "graph", "dot"]
 homepage = "https://github.com/pseitz/dep_graph_rs"
 repository = "https://github.com/pseitz/dep_graph_rs"
 readme = "README.md"
 license = "MIT"
-include = ["src/*.rs", "src/frame/**/*", "src/block/**/*", "README.md", "LICENSE"]
+include = ["src/*.rs", "*.md", "LICENSE"]
 
 [dependencies]
 anyhow = "1.0.98"
