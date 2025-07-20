@@ -252,17 +252,16 @@ fn collect_super_imports(u: &syn::ItemUse, mod_path: &Module) -> Vec<(Module, St
     collect_imports(cursor, &prefix)
 }
 
-struct Collector<'g, 'w> {
+struct Collector<'g> {
     file_path: PathBuf,
     mod_path: Module, // e.g. ["crate", "data", "engine"]
     root: &'g Path,
     in_test: bool,
     graph: &'g mut Graph,
     module_files: &'g mut HashMap<Module, PathBuf>,
-    modules_to_scan: &'w mut Vec<(Module, Module)>,
 }
 
-impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
+impl<'g, 'ast> Visit<'ast> for Collector<'g> {
     fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
         if self.in_test || is_cfg_test(&u.attrs) {
             return;
@@ -316,7 +315,6 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
                 self.module_files
                     .entry(key.clone())
                     .or_insert(filename.clone());
-                self.modules_to_scan.push((self.mod_path.clone(), key));
             }
         }
 
@@ -399,32 +397,42 @@ fn scan(cli: Cli) -> Result<Graph> {
     let mut graph = Graph::new(cli.mode, cli.filter.unwrap_or_default());
 
     let mut module_files = HashMap::<Module, PathBuf>::new();
-    let crate_mod = Module::from(vec!["crate".to_string()]);
-    let mut modules_to_scan = vec![(crate_mod.clone(), crate_mod.clone())];
-    module_files.insert(crate_mod, root_rs.clone());
+    module_files.insert(Module::default(), root_rs.clone());
 
     let mut visited_files = HashSet::new();
-    while let Some((mod_path, mod_key)) = modules_to_scan.pop() {
-        let file_path = module_files
-            .get(&mod_key)
-            .cloned()
-            .context("file path not found for module")?;
-        if visited(&file_path, &mut visited_files) {
-            continue;
-        }
-        let code = fs::read_to_string(&file_path)?;
-        let ast: File = syn::parse_str(&code)?;
+    loop {
+        let modules_to_scan: Vec<(Module, PathBuf)> = module_files
+            .iter()
+            .map(|(m, p)| (m.clone(), fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
+            .filter(|(_, path)| !visited_files.contains(path))
+            .collect();
 
-        let mut v = Collector {
-            file_path: file_path.clone(),
-            mod_path,
-            root: &crate_root,
-            in_test: false,
-            graph: &mut graph,
-            modules_to_scan: &mut modules_to_scan,
-            module_files: &mut module_files,
-        };
-        v.visit_file(&ast);
+        if modules_to_scan.is_empty() {
+            break;
+        }
+
+        for (mod_key, file_path) in modules_to_scan {
+            visited_files.insert(file_path.clone());
+
+            let mod_path = {
+                let mut p = vec!["crate".to_string()];
+                p.extend(mod_key.path.clone());
+                Module::from(p)
+            };
+
+            let code = fs::read_to_string(&file_path)?;
+            let ast: File = syn::parse_str(&code)?;
+
+            let mut v = Collector {
+                file_path: file_path.clone(),
+                mod_path,
+                root: &crate_root,
+                in_test: false,
+                graph: &mut graph,
+                module_files: &mut module_files,
+            };
+            v.visit_file(&ast);
+        }
     }
 
     // Add edges from "crate" to all top-level modules.
@@ -440,12 +448,6 @@ fn scan(cli: Cli) -> Result<Graph> {
     Ok(graph)
 }
 
-/// Scan files only once.
-fn visited(p: &Path, visited: &mut HashSet<PathBuf>) -> bool {
-    let canon = fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    !visited.insert(canon)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,7 +459,6 @@ mod tests {
         let root = Path::new(".");
         let file_path = PathBuf::from("lib.rs");
         let mut graph = Graph::new(Grouping::File, Filter::default());
-        let mut modules_to_scan = Vec::new();
 
         let mut collector = Collector {
             file_path: file_path.clone(),
@@ -466,7 +467,6 @@ mod tests {
             in_test: false,
             graph: &mut graph,
             module_files,
-            modules_to_scan: &mut modules_to_scan,
         };
 
         let ast: File = syn::parse_str(code).expect("failed to parse code");
