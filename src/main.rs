@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{arg, command, Args, Parser, ValueEnum};
 use regex::Regex;
-use syn::{visit::Visit, Attribute, File, ItemMod, Meta, UseTree};
+use syn::{visit::Visit, Attribute, File, ItemMacro, ItemMod, Meta, UseTree};
 
 mod graph;
 use crate::graph::Graph;
@@ -188,22 +188,21 @@ fn collect_super_imports(u: &syn::ItemUse, mod_path: &[String]) -> Vec<(String, 
         return Vec::new();
     }
 
-    // Build the prefix: everything after `crate` minus the popped `supers`.
+    // Build the prefix: everything after `crate` minus the removed `supers`.
     let prefix: Vec<String> = mod_path[1..mod_path.len() - supers].to_vec();
     collect_imports(cursor, &prefix)
 }
 
-struct Collector<'g, 'w> {
+struct Collector<'g> {
     file_path: PathBuf,
     mod_path: Vec<String>, // e.g. ["crate", "data", "engine"]
     root: &'g Path,
     in_test: bool,
     graph: &'g mut Graph,
-    files_to_scan: &'w mut Vec<(Vec<String>, PathBuf)>,
     module_files: &'g mut HashMap<String, PathBuf>,
 }
 
-impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
+impl<'g, 'ast> Visit<'ast> for Collector<'g> {
     fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
         if self.in_test || is_cfg_test(&u.attrs) {
             return;
@@ -212,6 +211,15 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
         // Collect imports from both `crate::…` and `super::…` paths.
         let mut imports = collect_crate_imports(u);
         imports.extend(collect_super_imports(u, &self.mod_path));
+        if let UseTree::Path(p) = &u.tree {
+            if p.ident == "crate" || p.ident == "super" {
+                // already handled
+            } else {
+                imports.extend(collect_imports(&u.tree, &[]));
+            }
+        } else {
+            imports.extend(collect_imports(&u.tree, &[]));
+        }
 
         for (seg, item) in imports {
             if let Some(to_filename) = self.module_files.get(&seg) {
@@ -220,8 +228,6 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
                 self.graph.add(from.clone(), to.clone(), item);
             }
         }
-
-        syn::visit::visit_item_use(self, u);
     }
 
     fn visit_item_mod(&mut self, m: &'ast ItemMod) {
@@ -230,7 +236,7 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
             return;
         }
 
-        // Build the *new* module path = current + this ident.
+        // Build the new module path = current + this ident.
         let mut new_path = self.mod_path.clone();
         new_path.push(m.ident.to_string());
 
@@ -251,19 +257,27 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
                 root: self.root,
                 in_test: this_is_test,
                 graph: self.graph,
-                files_to_scan: self.files_to_scan,
                 module_files: self.module_files,
             };
             for it in items {
                 inner.visit_item(it);
             }
+        }
+
+        // Module declared in another file. The `scan` function will find it.
+    }
+
+    fn visit_item_macro(&mut self, i: &'ast ItemMacro) {
+        if self.in_test || is_cfg_test(&i.attrs) {
             return;
         }
 
-        // Module declared in another file
-        if let Some(filename) = find_mod_file(&self.file_path, &m.ident.to_string()) {
-            self.module_files.entry(key).or_insert(filename.clone());
-            self.files_to_scan.push((new_path, filename));
+        // The macro can contain modules, so we need to parse the tokens
+        // and visit the resulting AST.
+        if let Ok(file) = syn::parse2::<File>(i.mac.tokens.clone()) {
+            for item in file.items {
+                self.visit_item(&item);
+            }
         }
     }
 }
@@ -333,20 +347,43 @@ fn scan(cli: Cli) -> Result<Graph> {
         let code = fs::read_to_string(&file_path)?;
         let ast: File = syn::parse_str(&code)?;
 
-        let mut v = Collector {
-            file_path: file_path.clone(),
-            mod_path,
-            root: &crate_root,
-            in_test: false,
-            graph: &mut graph,
-            files_to_scan: &mut files_to_scan,
-            module_files: &mut module_files,
+        let mod_path_clone = {
+            let mut v = Collector {
+                file_path: file_path.clone(),
+                mod_path,
+                root: &crate_root,
+                in_test: false,
+                graph: &mut graph,
+                module_files: &mut module_files,
+            };
+            v.visit_file(&ast);
+            v.mod_path
         };
-        v.visit_file(&ast);
+
+        // After visiting the file, check for any new module declarations
+        // that need to be scanned.
+        for item in &ast.items {
+            if let syn::Item::Mod(m) = item {
+                if m.content.is_none() {
+                    let mut new_path = mod_path_clone.clone();
+                    new_path.push(m.ident.to_string());
+                    let key = new_path
+                        .iter()
+                        .skip(1)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    if let Some(filename) = find_mod_file(&file_path, &m.ident.to_string()) {
+                        module_files.entry(key).or_insert(filename.clone());
+                        files_to_scan.push((new_path, filename));
+                    }
+                }
+            }
+        }
     }
 
     // Add edges from "crate" to all top-level modules.
-    for (mod_name, _path) in &module_files {
+    for mod_name in module_files.keys() {
         if !mod_name.is_empty() && !mod_name.contains("::") {
             graph.add("crate".to_string(), mod_name.clone(), "".to_string());
         }
@@ -375,7 +412,6 @@ mod tests {
         let root = Path::new(".");
         let file_path = PathBuf::from("lib.rs");
         let mut graph = Graph::new(Grouping::File, Filter::default());
-        let mut files_to_scan = Vec::new();
 
         let mut collector = Collector {
             file_path: file_path.clone(),
@@ -383,7 +419,6 @@ mod tests {
             root,
             in_test: false,
             graph: &mut graph,
-            files_to_scan: &mut files_to_scan,
             module_files,
         };
 
@@ -397,11 +432,18 @@ mod tests {
     }
 
     fn check_edge_with_item(graph: &Graph, from: &str, to: &str, item: Option<&str>) {
-        let edge = graph.edges.get(&(from.to_string(), to.to_string()));
+        let edge = graph.edges.get(&(from.to_string(), to.to_string()).into());
+        let mut edges = graph
+            .edges
+            .keys()
+            .map(|edge| edge.to_string())
+            .collect::<Vec<_>>();
+        edges.sort();
+
         assert!(
             edge.is_some(),
-            "expected edge from '{from}' to '{to}' not found in edge set {:?}",
-            &graph.edges.keys()
+            "expected edge '{from}'->'{to}' not found in edge set:\n{}",
+            edges.join("\n")
         );
         if let Some(item) = item {
             assert!(
@@ -443,11 +485,11 @@ mod tests {
 
         let mut expected = HashMap::new();
         expected.insert(
-            ("lib.rs".into(), "mod2.rs".into()),
+            ("lib.rs", "mod2.rs").into(),
             vec!["mod2_add".into()].into_iter().collect(),
         );
         expected.insert(
-            ("lib.rs".into(), "mod3.rs".into()),
+            ("lib.rs", "mod3.rs").into(),
             vec!["mod3_add".into()].into_iter().collect(),
         );
 
@@ -505,5 +547,38 @@ mod tests {
         check_edge(&graph, "crate", "mod2");
         check_edge(&graph, "crate", "mod3");
         check_edge(&graph, "crate", "graphics");
+        //check_edge(&graph, "graphics", "graphics::plattform");
+    }
+
+    #[test]
+    /// From tokio
+    fn test_macro_wrapped_module() {
+        let code = r#"
+            macro_rules! cfg_net {
+                ($($item:item)*) => {
+                    $(
+                        #[cfg(feature = "net")]
+                        $item
+                    )*
+                }
+            }
+
+            cfg_net! {
+                mod lookup_host;
+                use lookup_host::do_lookup;
+
+                mod tcp;
+                use tcp::connect;
+            }
+        "#;
+
+        let mut module_files = HashMap::new();
+        module_files.insert("lookup_host".to_owned(), PathBuf::from("lookup_host.rs"));
+        module_files.insert("tcp".to_owned(), PathBuf::from("tcp.rs"));
+
+        let graph = graph_from_str(code, &mut module_files);
+
+        check_edge_with_item(&graph, "lib.rs", "lookup_host.rs", Some("do_lookup"));
+        check_edge_with_item(&graph, "lib.rs", "tcp.rs", Some("connect"));
     }
 }

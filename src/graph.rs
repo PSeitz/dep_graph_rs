@@ -6,9 +6,38 @@ use std::{
 use crate::{file_path_to_mod_path, Filter, Grouping};
 
 pub struct Graph {
-    pub edges: HashMap<(String, String), HashSet<String>>,
+    pub edges: HashMap<Edge, HashSet<String>>,
     mode: Grouping,
     filter: Filter,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct Edge {
+    src: String,
+    dst: String,
+}
+impl From<(String, String)> for Edge {
+    fn from((from, to): (String, String)) -> Self {
+        Self { src: from, dst: to }
+    }
+}
+impl From<(&str, &str)> for Edge {
+    fn from((from, to): (&str, &str)) -> Self {
+        Self {
+            src: from.to_string(),
+            dst: to.to_string(),
+        }
+    }
+}
+impl std::fmt::Display for Edge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} -> {}", self.src, self.dst)
+    }
+}
+impl std::fmt::Debug for Edge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} -> {}", self.src, self.dst)
+    }
 }
 
 impl Graph {
@@ -21,7 +50,7 @@ impl Graph {
     }
     pub fn add(&mut self, from: String, to: String, why: String) {
         if from != to {
-            self.edges.entry((from, to)).or_default().insert(why);
+            self.edges.entry((from, to).into()).or_default().insert(why);
         }
     }
 
@@ -41,7 +70,7 @@ impl Graph {
     }
 
     pub fn apply_filter(&mut self) {
-        for ((_src, _dst), items) in &mut self.edges {
+        for items in self.edges.values_mut() {
             if let Some(ref item_filt) = self.filter.item {
                 items.retain(|why| {
                     item_filt.is_match(why)
@@ -54,8 +83,8 @@ impl Graph {
                 });
             }
         }
-        self.edges.retain(|(src, dst), items| {
-            if !self.filter.is_match(src, dst) {
+        self.edges.retain(|edge, items| {
+            if !self.filter.is_match(&edge.src, &edge.dst) {
                 return false;
             }
             if self.filter.item.is_some() && items.is_empty() {
@@ -67,12 +96,12 @@ impl Graph {
 
     pub fn apply_grouping(&mut self) {
         if self.mode == Grouping::Module {
-            let mut new_edges: HashMap<(String, String), HashSet<String>> = HashMap::new();
-            for ((src, dst), whys) in self.edges.drain() {
-                let src_mod = file_path_to_mod_path(&PathBuf::from(&src));
-                let dst_mod = file_path_to_mod_path(&PathBuf::from(&dst));
+            let mut new_edges: HashMap<Edge, HashSet<String>> = HashMap::new();
+            for (edge, whys) in self.edges.drain() {
+                let src_mod = file_path_to_mod_path(&PathBuf::from(&edge.src));
+                let dst_mod = file_path_to_mod_path(&PathBuf::from(&edge.dst));
                 new_edges
-                    .entry((src_mod, dst_mod))
+                    .entry((src_mod, dst_mod).into())
                     .or_default()
                     .extend(whys);
             }
@@ -88,14 +117,16 @@ impl Graph {
         } else {
             "/"
         };
-        for (src, dst) in self.edges.keys() {
-            for v in [src, dst] {
-                if let Some(root) = v.split(sep).next() {
-                    clusters
-                        .entry(root.to_string())
-                        .or_default()
-                        .insert(v.clone());
-                }
+        for module in self
+            .edges
+            .keys()
+            .flat_map(|e| [e.src.clone(), e.dst.clone()])
+        {
+            if let Some(root) = module.split(sep).next() {
+                clusters
+                    .entry(root.to_string())
+                    .or_default()
+                    .insert(module.clone());
             }
         }
 
@@ -138,15 +169,17 @@ impl Graph {
 
         // emit edges
         let mut edges: Vec<_> = self.edges.iter().collect();
-        edges.sort_by_key(|((s, d), _)| (s.clone(), d.clone()));
-        for ((src, dst), whys) in edges {
+        edges.sort_by_key(|(edge, _)| (*edge).clone());
+        for (edge, whys) in edges {
             let lbl = Self::get_edge_label(whys);
             let mut extra = String::new();
-            if let Some(root) = root_of(dst) {
+            if let Some(root) = root_of(&edge.dst) {
                 if clusters.contains_key(&root) {
                     extra.push_str(&format!(",lhead=\"cluster_{root}\""));
                 }
             }
+            let src = &edge.src;
+            let dst = &edge.dst;
             println!("  \"{src}\" -> \"{dst}\" [label=\"{lbl}\"{extra}];");
         }
 
