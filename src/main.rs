@@ -193,16 +193,17 @@ fn collect_super_imports(u: &syn::ItemUse, mod_path: &[String]) -> Vec<(String, 
     collect_imports(cursor, &prefix)
 }
 
-struct Collector<'g> {
+struct Collector<'g, 'w> {
     file_path: PathBuf,
     mod_path: Vec<String>, // e.g. ["crate", "data", "engine"]
     root: &'g Path,
     in_test: bool,
     graph: &'g mut Graph,
     module_files: &'g mut HashMap<String, PathBuf>,
+    files_to_scan: &'w mut Vec<(Vec<String>, PathBuf)>,
 }
 
-impl<'g, 'ast> Visit<'ast> for Collector<'g> {
+impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
     fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
         if self.in_test || is_cfg_test(&u.attrs) {
             return;
@@ -236,35 +237,41 @@ impl<'g, 'ast> Visit<'ast> for Collector<'g> {
             return;
         }
 
-        // Build the new module path = current + this ident.
-        let mut new_path = self.mod_path.clone();
-        new_path.push(m.ident.to_string());
+        self.mod_path.push(m.ident.to_string());
 
-        // Compute the normalized key (skip the leading "crate").
-        let key_segments: Vec<String> = new_path.iter().skip(1).cloned().collect();
-        let key = key_segments.join("::");
-
-        // Inline module
         if let Some((_, items)) = &m.content {
-            // All items live in the *current* file.
+            // Inline module
+            let key = self
+                .mod_path
+                .iter()
+                .skip(1)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("::");
             self.module_files
                 .entry(key)
                 .or_insert_with(|| self.file_path.clone());
 
-            let mut inner = Collector {
-                file_path: self.file_path.clone(),
-                mod_path: new_path,
-                root: self.root,
-                in_test: this_is_test,
-                graph: self.graph,
-                module_files: self.module_files,
-            };
+            // Visit items in the inline module
             for it in items {
-                inner.visit_item(it);
+                self.visit_item(it);
+            }
+        } else {
+            // Module in another file
+            let key = self
+                .mod_path
+                .iter()
+                .skip(1)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("::");
+            if let Some(filename) = find_mod_file(&self.file_path, &m.ident.to_string()) {
+                self.module_files.entry(key).or_insert(filename.clone());
+                self.files_to_scan.push((self.mod_path.clone(), filename));
             }
         }
 
-        // Module declared in another file. The `scan` function will find it.
+        self.mod_path.pop();
     }
 
     fn visit_item_macro(&mut self, i: &'ast ItemMacro) {
@@ -347,39 +354,16 @@ fn scan(cli: Cli) -> Result<Graph> {
         let code = fs::read_to_string(&file_path)?;
         let ast: File = syn::parse_str(&code)?;
 
-        let mod_path_clone = {
-            let mut v = Collector {
-                file_path: file_path.clone(),
-                mod_path,
-                root: &crate_root,
-                in_test: false,
-                graph: &mut graph,
-                module_files: &mut module_files,
-            };
-            v.visit_file(&ast);
-            v.mod_path
+        let mut v = Collector {
+            file_path: file_path.clone(),
+            mod_path,
+            root: &crate_root,
+            in_test: false,
+            graph: &mut graph,
+            files_to_scan: &mut files_to_scan,
+            module_files: &mut module_files,
         };
-
-        // After visiting the file, check for any new module declarations
-        // that need to be scanned.
-        for item in &ast.items {
-            if let syn::Item::Mod(m) = item {
-                if m.content.is_none() {
-                    let mut new_path = mod_path_clone.clone();
-                    new_path.push(m.ident.to_string());
-                    let key = new_path
-                        .iter()
-                        .skip(1)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("::");
-                    if let Some(filename) = find_mod_file(&file_path, &m.ident.to_string()) {
-                        module_files.entry(key).or_insert(filename.clone());
-                        files_to_scan.push((new_path, filename));
-                    }
-                }
-            }
-        }
+        v.visit_file(&ast);
     }
 
     // Add edges from "crate" to all top-level modules.
@@ -412,6 +396,7 @@ mod tests {
         let root = Path::new(".");
         let file_path = PathBuf::from("lib.rs");
         let mut graph = Graph::new(Grouping::File, Filter::default());
+        let mut files_to_scan = Vec::new();
 
         let mut collector = Collector {
             file_path: file_path.clone(),
@@ -420,6 +405,7 @@ mod tests {
             in_test: false,
             graph: &mut graph,
             module_files,
+            files_to_scan: &mut files_to_scan,
         };
 
         let ast: File = syn::parse_str(code).expect("failed to parse code");
@@ -547,6 +533,7 @@ mod tests {
         check_edge(&graph, "crate", "mod2");
         check_edge(&graph, "crate", "mod3");
         check_edge(&graph, "crate", "graphics");
+        check_edge(&graph, "graphics::plattform::ps1", "graphics::plattform");
         //check_edge(&graph, "graphics", "graphics::plattform");
     }
 
