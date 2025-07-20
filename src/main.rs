@@ -12,6 +12,49 @@ use syn::{visit::Visit, Attribute, File, ItemMacro, ItemMod, Meta, UseTree};
 mod graph;
 use crate::graph::Graph;
 
+#[derive(Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Debug, Default)]
+pub struct Module {
+    path: Vec<String>,
+}
+
+impl Module {
+    pub fn to_string(&self) -> String {
+        self.path.join("::")
+    }
+
+    fn push(&mut self, segment: String) {
+        self.path.push(segment);
+    }
+
+    fn pop(&mut self) {
+        self.path.pop();
+    }
+
+    fn as_slice(&self) -> &[String] {
+        &self.path
+    }
+}
+
+impl From<Vec<String>> for Module {
+    fn from(path: Vec<String>) -> Self {
+        Self { path }
+    }
+}
+
+impl From<&[String]> for Module {
+    fn from(path: &[String]) -> Self {
+        Self {
+            path: path.to_vec(),
+        }
+    }
+}
+
+impl std::fmt::Display for Module {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.path.join("::"))
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum Grouping {
     File,
@@ -109,53 +152,68 @@ fn is_cfg_test(attrs: &[Attribute]) -> bool {
     })
 }
 
-/// Collect `(module_path, item)` pairs from a `UseTree`, prefixing each
-/// module path with `prefix`.
-fn collect_imports(tree: &UseTree, prefix: &[String]) -> Vec<(String, String)> {
-    fn walk(tree: &UseTree, segs: &mut Vec<String>, out: &mut Vec<(String, String)>) {
-        use syn::UseTree::*;
-        match tree {
-            Path(p) => {
-                segs.push(p.ident.to_string());
-                walk(&p.tree, segs, out);
-                segs.pop();
-            }
-            Name(n) => {
-                // Special‑case `use crate::foo;` where the *module* is `foo`.
-                let module = if segs.is_empty() {
-                    n.ident.to_string()
-                } else {
-                    segs.join("::")
-                };
-                out.push((module, n.ident.to_string()));
-            }
-            Rename(r) => {
-                let module = if segs.is_empty() {
-                    r.ident.to_string()
-                } else {
-                    segs.join("::")
-                };
-                out.push((module, r.rename.to_string()));
-            }
-            Group(g) => {
-                for it in &g.items {
-                    walk(it, segs, out);
-                }
-            }
-            Glob(_) => {
-                out.push((segs.join("::"), "*".into()));
-            }
+struct ImportCollector {
+    imports: Vec<(Module, String)>,
+    current_path: Vec<String>,
+}
+
+impl ImportCollector {
+    fn new(prefix: &[String]) -> Self {
+        Self {
+            imports: Vec::new(),
+            current_path: prefix.to_vec(),
         }
     }
 
-    let mut segs = prefix.to_vec();
-    let mut out = Vec::new();
-    walk(tree, &mut segs, &mut out);
-    out
+    fn walk(&mut self, tree: &UseTree) {
+        use syn::UseTree::*;
+        match tree {
+            Path(p) => {
+                self.current_path.push(p.ident.to_string());
+                self.walk(&p.tree);
+                self.current_path.pop();
+            }
+            Name(n) => {
+                let module_path = if self.current_path.is_empty() {
+                    vec![n.ident.to_string()]
+                } else {
+                    self.current_path.clone()
+                };
+                self.imports
+                    .push((Module::from(module_path), n.ident.to_string()));
+            }
+            Rename(r) => {
+                let module_path = if self.current_path.is_empty() {
+                    vec![r.ident.to_string()]
+                } else {
+                    self.current_path.clone()
+                };
+                self.imports
+                    .push((Module::from(module_path), r.rename.to_string()));
+            }
+            Group(g) => {
+                for it in &g.items {
+                    self.walk(it);
+                }
+            }
+            Glob(_) => {
+                self.imports
+                    .push((Module::from(self.current_path.clone()), "*".into()));
+            }
+        }
+    }
+}
+
+/// Collect `(module_path, item)` pairs from a `UseTree`, prefixing each
+/// module path with `prefix`.
+fn collect_imports(tree: &UseTree, prefix: &[String]) -> Vec<(Module, String)> {
+    let mut collector = ImportCollector::new(prefix);
+    collector.walk(tree);
+    collector.imports
 }
 
 /// Handle `use crate::…` imports.
-fn collect_crate_imports(u: &syn::ItemUse) -> Vec<(String, String)> {
+fn collect_crate_imports(u: &syn::ItemUse) -> Vec<(Module, String)> {
     if let UseTree::Path(crate_path) = &u.tree {
         if crate_path.ident == "crate" {
             return collect_imports(&crate_path.tree, &[]);
@@ -166,7 +224,7 @@ fn collect_crate_imports(u: &syn::ItemUse) -> Vec<(String, String)> {
 
 /// Handle `use super::…` imports, resolving them into an absolute
 /// `crate::…` path based on the current module path.
-fn collect_super_imports(u: &syn::ItemUse, mod_path: &[String]) -> Vec<(String, String)> {
+fn collect_super_imports(u: &syn::ItemUse, mod_path: &Module) -> Vec<(Module, String)> {
     use syn::UseTree::*;
 
     // Count the leading `super` segments.
@@ -182,25 +240,26 @@ fn collect_super_imports(u: &syn::ItemUse, mod_path: &[String]) -> Vec<(String, 
     if supers == 0 {
         return Vec::new(); // not a super‑import
     }
-    if mod_path.len() <= supers {
+    let mod_path_slice = mod_path.as_slice();
+    if mod_path_slice.len() <= supers {
         // would walk past the crate root – ignore.
         // May happen if entry point is not the root maybe?
         return Vec::new();
     }
 
     // Build the prefix: everything after `crate` minus the removed `supers`.
-    let prefix: Vec<String> = mod_path[1..mod_path.len() - supers].to_vec();
+    let prefix: Vec<String> = mod_path_slice[1..mod_path_slice.len() - supers].to_vec();
     collect_imports(cursor, &prefix)
 }
 
 struct Collector<'g, 'w> {
     file_path: PathBuf,
-    mod_path: Vec<String>, // e.g. ["crate", "data", "engine"]
+    mod_path: Module, // e.g. ["crate", "data", "engine"]
     root: &'g Path,
     in_test: bool,
     graph: &'g mut Graph,
-    module_files: &'g mut HashMap<String, PathBuf>,
-    files_to_scan: &'w mut Vec<(Vec<String>, PathBuf)>,
+    module_files: &'g mut HashMap<Module, PathBuf>,
+    modules_to_scan: &'w mut Vec<(Module, Module)>,
 }
 
 impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
@@ -222,8 +281,8 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
             imports.extend(collect_imports(&u.tree, &[]));
         }
 
-        for (seg, item) in imports {
-            if let Some(to_filename) = self.module_files.get(&seg) {
+        for (module, item) in imports {
+            if let Some(to_filename) = self.module_files.get(&module) {
                 let from = rel(&self.file_path, self.root);
                 let to = rel(to_filename, self.root);
                 self.graph.add(from.clone(), to.clone(), item);
@@ -241,13 +300,7 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
 
         if let Some((_, items)) = &m.content {
             // Inline module
-            let key = self
-                .mod_path
-                .iter()
-                .skip(1)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("::");
+            let key = Module::from(self.mod_path.as_slice()[1..].to_vec());
             self.module_files
                 .entry(key)
                 .or_insert_with(|| self.file_path.clone());
@@ -258,16 +311,12 @@ impl<'g, 'w, 'ast> Visit<'ast> for Collector<'g, 'w> {
             }
         } else {
             // Module in another file
-            let key = self
-                .mod_path
-                .iter()
-                .skip(1)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("::");
+            let key = Module::from(self.mod_path.as_slice()[1..].to_vec());
             if let Some(filename) = find_mod_file(&self.file_path, &m.ident.to_string()) {
-                self.module_files.entry(key).or_insert(filename.clone());
-                self.files_to_scan.push((self.mod_path.clone(), filename));
+                self.module_files
+                    .entry(key.clone())
+                    .or_insert(filename.clone());
+                self.modules_to_scan.push((self.mod_path.clone(), key));
             }
         }
 
@@ -296,7 +345,7 @@ fn rel(p: &Path, root: &Path) -> String {
         .into_owned()
 }
 
-pub fn file_path_to_mod_path(file_path: &Path) -> String {
+pub fn file_path_to_mod_path(file_path: &Path) -> Module {
     let file_path = file_path.to_string_lossy();
     let file_path = if let Some(pos) = file_path.rfind("/mod.rs") {
         file_path[..pos].to_string()
@@ -304,7 +353,14 @@ pub fn file_path_to_mod_path(file_path: &Path) -> String {
         file_path.to_string()
     };
 
-    file_path.replace('/', "::").replace(".rs", "")
+    let path_str = file_path.replace(".rs", "");
+    Module::from(
+        path_str
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn find_mod_file(parent_file: &Path, ident: &str) -> Option<PathBuf> {
@@ -342,12 +398,17 @@ fn scan(cli: Cli) -> Result<Graph> {
     };
     let mut graph = Graph::new(cli.mode, cli.filter.unwrap_or_default());
 
-    let mut module_files = HashMap::<String, PathBuf>::new();
-    let mut files_to_scan = vec![(vec!["crate".into()], root_rs.clone())];
-    module_files.insert("crate".to_string(), root_rs);
+    let mut module_files = HashMap::<Module, PathBuf>::new();
+    let crate_mod = Module::from(vec!["crate".to_string()]);
+    let mut modules_to_scan = vec![(crate_mod.clone(), crate_mod.clone())];
+    module_files.insert(crate_mod, root_rs.clone());
 
     let mut visited_files = HashSet::new();
-    while let Some((mod_path, file_path)) = files_to_scan.pop() {
+    while let Some((mod_path, mod_key)) = modules_to_scan.pop() {
+        let file_path = module_files
+            .get(&mod_key)
+            .cloned()
+            .context("file path not found for module")?;
         if visited(&file_path, &mut visited_files) {
             continue;
         }
@@ -360,7 +421,7 @@ fn scan(cli: Cli) -> Result<Graph> {
             root: &crate_root,
             in_test: false,
             graph: &mut graph,
-            files_to_scan: &mut files_to_scan,
+            modules_to_scan: &mut modules_to_scan,
             module_files: &mut module_files,
         };
         v.visit_file(&ast);
@@ -368,8 +429,8 @@ fn scan(cli: Cli) -> Result<Graph> {
 
     // Add edges from "crate" to all top-level modules.
     for mod_name in module_files.keys() {
-        if !mod_name.is_empty() && !mod_name.contains("::") {
-            graph.add("crate".to_string(), mod_name.clone(), "".to_string());
+        if !mod_name.to_string().is_empty() && !mod_name.to_string().contains("::") {
+            graph.add("crate".to_string(), mod_name.to_string(), "".to_string());
         }
     }
 
@@ -392,20 +453,20 @@ mod tests {
     use std::collections::HashMap;
     use syn::{File, ItemUse};
 
-    fn graph_from_str(code: &str, module_files: &mut HashMap<String, PathBuf>) -> Graph {
+    fn graph_from_str(code: &str, module_files: &mut HashMap<Module, PathBuf>) -> Graph {
         let root = Path::new(".");
         let file_path = PathBuf::from("lib.rs");
         let mut graph = Graph::new(Grouping::File, Filter::default());
-        let mut files_to_scan = Vec::new();
+        let mut modules_to_scan = Vec::new();
 
         let mut collector = Collector {
             file_path: file_path.clone(),
-            mod_path: vec!["crate".to_string()],
+            mod_path: Module::from(vec!["crate".to_string()]),
             root,
             in_test: false,
             graph: &mut graph,
             module_files,
-            files_to_scan: &mut files_to_scan,
+            modules_to_scan: &mut modules_to_scan,
         };
 
         let ast: File = syn::parse_str(code).expect("failed to parse code");
@@ -464,8 +525,14 @@ mod tests {
         "#;
 
         let mut module_files = HashMap::new();
-        module_files.insert("mod2".to_owned(), PathBuf::from("mod2.rs"));
-        module_files.insert("mod3".to_owned(), PathBuf::from("mod3.rs"));
+        module_files.insert(
+            Module::from(vec!["mod2".to_owned()]),
+            PathBuf::from("mod2.rs"),
+        );
+        module_files.insert(
+            Module::from(vec!["mod3".to_owned()]),
+            PathBuf::from("mod3.rs"),
+        );
 
         let graph = graph_from_str(code, &mut module_files);
 
@@ -487,7 +554,7 @@ mod tests {
     fn test_collect_crate_imports_simple_path() {
         let tree: ItemUse = syn::parse_str("use crate::mod2::foo;").unwrap();
         let got = collect_crate_imports(&tree);
-        let want = vec![("mod2".to_string(), "foo".to_string())];
+        let want = vec![(Module::from(vec!["mod2".to_string()]), "foo".to_string())];
         assert_eq!(got, want);
     }
 
@@ -497,9 +564,9 @@ mod tests {
         let mut got = collect_crate_imports(&tree);
         got.sort();
         let mut want = vec![
-            ("mod2".to_string(), "a".to_string()),
-            ("mod2".to_string(), "b".to_string()),
-            ("mod2".to_owned(), "c".to_string()),
+            (Module::from(vec!["mod2".to_string()]), "a".to_string()),
+            (Module::from(vec!["mod2".to_string()]), "b".to_string()),
+            (Module::from(vec!["mod2".to_string()]), "c".to_string()),
         ];
         want.sort();
         assert_eq!(got, want);
@@ -511,8 +578,8 @@ mod tests {
         let mut got = collect_crate_imports(&tree);
         got.sort();
         let mut want = vec![
-            ("m1".to_string(), "x".to_string()),
-            ("m2".to_string(), "y".to_string()),
+            (Module::from(vec!["m1".to_string()]), "x".to_string()),
+            (Module::from(vec!["m2".to_string()]), "y".to_string()),
         ];
         want.sort();
         assert_eq!(got, want);
@@ -560,8 +627,14 @@ mod tests {
         "#;
 
         let mut module_files = HashMap::new();
-        module_files.insert("lookup_host".to_owned(), PathBuf::from("lookup_host.rs"));
-        module_files.insert("tcp".to_owned(), PathBuf::from("tcp.rs"));
+        module_files.insert(
+            Module::from(vec!["lookup_host".to_owned()]),
+            PathBuf::from("lookup_host.rs"),
+        );
+        module_files.insert(
+            Module::from(vec!["tcp".to_owned()]),
+            PathBuf::from("tcp.rs"),
+        );
 
         let graph = graph_from_str(code, &mut module_files);
 

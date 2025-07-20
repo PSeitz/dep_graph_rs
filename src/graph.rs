@@ -98,8 +98,8 @@ impl Graph {
         if self.mode == Grouping::Module {
             let mut new_edges: HashMap<Edge, HashSet<String>> = HashMap::new();
             for (edge, whys) in self.edges.drain() {
-                let src_mod = file_path_to_mod_path(&PathBuf::from(&edge.src));
-                let dst_mod = file_path_to_mod_path(&PathBuf::from(&edge.dst));
+                let src_mod = file_path_to_mod_path(&PathBuf::from(&edge.src)).to_string();
+                let dst_mod = file_path_to_mod_path(&PathBuf::from(&edge.dst)).to_string();
                 new_edges
                     .entry((src_mod, dst_mod).into())
                     .or_default()
