@@ -10,50 +10,8 @@ use regex::Regex;
 use syn::{visit::Visit, Attribute, File, ItemMacro, ItemMod, Meta, UseTree};
 
 mod graph;
-use crate::graph::Graph;
-
-#[derive(Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Debug, Default)]
-pub struct Module {
-    path: Vec<String>,
-}
-
-impl Module {
-    pub fn to_string(&self) -> String {
-        self.path.join("::")
-    }
-
-    fn push(&mut self, segment: String) {
-        self.path.push(segment);
-    }
-
-    fn pop(&mut self) {
-        self.path.pop();
-    }
-
-    fn as_slice(&self) -> &[String] {
-        &self.path
-    }
-}
-
-impl From<Vec<String>> for Module {
-    fn from(path: Vec<String>) -> Self {
-        Self { path }
-    }
-}
-
-impl From<&[String]> for Module {
-    fn from(path: &[String]) -> Self {
-        Self {
-            path: path.to_vec(),
-        }
-    }
-}
-
-impl std::fmt::Display for Module {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.path.join("::"))
-    }
-}
+mod module;
+use crate::{graph::Graph, module::Module};
 
 #[derive(Debug, Default, Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum Grouping {
@@ -415,9 +373,9 @@ fn scan(cli: Cli) -> Result<Graph> {
             visited_files.insert(file_path.clone());
 
             let mod_path = {
-                let mut p = vec!["crate".to_string()];
-                p.extend(mod_key.path.clone());
-                Module::from(p)
+                let mut p = mod_key.clone();
+                p.prepend("crate".to_string());
+                p
             };
 
             let code = fs::read_to_string(&file_path)?;
