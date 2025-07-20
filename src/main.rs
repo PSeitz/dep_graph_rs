@@ -322,7 +322,8 @@ fn scan(cli: Cli) -> Result<Graph> {
     let mut graph = Graph::new(cli.mode, cli.filter.unwrap_or_default());
 
     let mut module_files = HashMap::<String, PathBuf>::new();
-    let mut files_to_scan = vec![(vec!["crate".into()], root_rs)];
+    let mut files_to_scan = vec![(vec!["crate".into()], root_rs.clone())];
+    module_files.insert("crate".to_string(), root_rs);
 
     let mut visited_files = HashSet::new();
     while let Some((mod_path, file_path)) = files_to_scan.pop() {
@@ -342,6 +343,13 @@ fn scan(cli: Cli) -> Result<Graph> {
             module_files: &mut module_files,
         };
         v.visit_file(&ast);
+    }
+
+    // Add edges from "crate" to all top-level modules.
+    for (mod_name, _path) in &module_files {
+        if !mod_name.is_empty() && !mod_name.contains("::") {
+            graph.add("crate".to_string(), mod_name.clone(), "".to_string());
+        }
     }
 
     graph.apply_grouping();
@@ -480,5 +488,22 @@ mod tests {
         ];
         want.sort();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_crate_root() {
+        // scan `test_project` folder
+        let root = PathBuf::from("test_proj1");
+        let cli = Cli {
+            root,
+            ..Default::default()
+        };
+        let graph = scan(cli).expect("failed to scan project");
+        assert!(!graph.edges.is_empty(), "Graph should not be empty");
+        // Check that the graph contains expected edges
+        check_edge(&graph, "crate", "mod1");
+        check_edge(&graph, "crate", "mod2");
+        check_edge(&graph, "crate", "mod3");
+        check_edge(&graph, "crate", "graphics");
     }
 }
