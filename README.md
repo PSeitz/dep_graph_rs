@@ -28,6 +28,7 @@ dep_graph_rs tantivy_folder --source "directory.*" > tantivy_directory_deps.dot
 *   Outputs in DOT format for use with Graphviz.
 *   Group dependencies by file or by module.
 *   Filter the graph by source, destination, or item (e.g., function name).
+*   Use an advanced query language with AND/OR/NOT to filter edges.
 *   Clusters nodes by their root module for better readability.
 
 ## Usage
@@ -62,6 +63,7 @@ You can render the generated `graph.dot` file in a few ways:
 *   `--source <regex>`: Filter by source module/file. 
 *   `--destination <regex>`: Filter by destination module/file.
 *   `--item <regex>`: Filter by the name of the imported item (e.g., a function or struct).
+*   `--query, -q <expr>`: Advanced query. Example: `source:*agg* AND destination:*segment*`. Supports `AND`, `OR`, `NOT`, parentheses, and fields `source|destination|item|any`. `*` is a wildcard; quotes allow spaces. The arrow shorthand `a->b` expands to `source:a AND destination:b`.
 
 For example, to only show dependencies originating from the `graphics` module:
 

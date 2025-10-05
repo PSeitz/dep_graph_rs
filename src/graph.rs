@@ -3,12 +3,14 @@ use std::{
     path::PathBuf,
 };
 
+use crate::query::Expr;
 use crate::{file_path_to_mod_path, Filter, Grouping};
 
 pub struct Graph {
     pub edges: HashMap<Edge, HashSet<String>>,
     mode: Grouping,
     filter: Filter,
+    query: Option<Expr>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -42,10 +44,21 @@ impl std::fmt::Debug for Edge {
 
 impl Graph {
     pub fn new(mode: Grouping, filter: Filter) -> Self {
+        let query = filter
+            .query
+            .as_deref()
+            .and_then(|q| match crate::query::parse_query(q) {
+                Ok(ast) => Some(ast),
+                Err(e) => {
+                    eprintln!("Failed to parse --query: {e}");
+                    None
+                }
+            });
         Self {
             edges: HashMap::new(),
             mode,
             filter,
+            query,
         }
     }
     pub fn add(&mut self, from: String, to: String, why: String) {
@@ -70,6 +83,19 @@ impl Graph {
     }
 
     pub fn apply_filter(&mut self) {
+        if let Some(ref expr) = self.query {
+            // Evaluate per item; keep only items that make the expr true.
+            for (edge, items) in self.edges.iter_mut() {
+                let src = &edge.src;
+                let dst = &edge.dst;
+                items.retain(|it| expr.eval(src, dst, it));
+            }
+            // Remove edges without any surviving items.
+            self.edges.retain(|_, items| !items.is_empty());
+            return;
+        }
+
+        // Legacy filters (regex flags)
         for items in self.edges.values_mut() {
             if let Some(ref item_filt) = self.filter.item {
                 items.retain(|why| {

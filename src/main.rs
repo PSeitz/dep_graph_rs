@@ -11,6 +11,7 @@ use syn::{visit::Visit, Attribute, File, ItemMacro, ItemMod, Meta, UseTree};
 
 mod graph;
 mod module;
+mod query;
 use crate::{graph::Graph, module::Module};
 
 #[derive(Debug, Default, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -48,6 +49,13 @@ pub struct Filter {
     /// it is treated as exact match and surrounded with `^…$`.
     #[arg(long, short, value_parser = parse_regex)]
     item: Option<Regex>,
+
+    /// Advanced query to filter edges using a small expression language.
+    /// Example: source:*agg* AND destination:*segment*
+    /// Supported: AND, OR, NOT, parentheses, fields: source,destination,item,any
+    /// Wildcard `*` matches any substring. Quotes allow spaces in patterns.
+    #[arg(long, short = 'q')]
+    query: Option<String>,
 }
 
 impl Filter {
@@ -598,5 +606,114 @@ mod tests {
 
         check_edge_with_item(&graph, "lib.rs", "lookup_host.rs", Some("do_lookup"));
         check_edge_with_item(&graph, "lib.rs", "tcp.rs", Some("connect"));
+    }
+
+    #[test]
+    fn test_query_filter_basic() {
+        // Build a small graph with multiple items and sources
+        let mut graph = Graph::new(
+            Grouping::File,
+            Filter {
+                query: Some("source:mod1 AND item:*foo*".to_string()),
+                ..Default::default()
+            },
+        );
+
+        graph.add("mod1.rs".into(), "mod2.rs".into(), "foo".into());
+        graph.add("mod1.rs".into(), "mod2.rs".into(), "bar".into());
+        graph.add("mod3.rs".into(), "mod2.rs".into(), "foo".into());
+
+        // Apply the query: keep only items where src contains "mod1" and item contains "foo"
+        graph.apply_filter();
+
+        // Only one edge should remain, with only the "foo" item
+        assert_eq!(graph.edges.len(), 1);
+        let items = graph
+            .edges
+            .get(&("mod1.rs".to_string(), "mod2.rs".to_string()).into())
+            .expect("expected filtered edge to exist");
+        assert!(items.contains("foo"), "expected item 'foo' to remain");
+        assert!(
+            !items.contains("bar"),
+            "unexpected item 'bar' should have been filtered out"
+        );
+    }
+
+    #[test]
+    fn test_query_filter_or() {
+        let mut graph = Graph::new(
+            Grouping::File,
+            Filter {
+                query: Some("item:*foo* OR item:*bar*".to_string()),
+                ..Default::default()
+            },
+        );
+
+        graph.add("a.rs".into(), "b.rs".into(), "foo".into());
+        graph.add("a.rs".into(), "b.rs".into(), "bar".into());
+        graph.add("a.rs".into(), "b.rs".into(), "baz".into());
+
+        graph.apply_filter();
+
+        let items = graph
+            .edges
+            .get(&("a.rs".to_string(), "b.rs".to_string()).into())
+            .expect("edge should remain");
+        assert!(items.contains("foo"));
+        assert!(items.contains("bar"));
+        assert!(!items.contains("baz"));
+    }
+
+    #[test]
+    fn test_query_filter_not_with_destination() {
+        let mut graph = Graph::new(
+            Grouping::File,
+            Filter {
+                query: Some("NOT destination:*mod3*".to_string()),
+                ..Default::default()
+            },
+        );
+
+        graph.add("mod1.rs".into(), "mod2.rs".into(), "foo".into());
+        graph.add("mod1.rs".into(), "mod3.rs".into(), "bar".into());
+
+        graph.apply_filter();
+
+        // Edge to mod3.rs should be removed
+        assert!(!graph
+            .edges
+            .contains_key(&("mod1.rs".to_string(), "mod3.rs".to_string()).into()));
+        // Edge to mod2.rs remains
+        assert!(graph
+            .edges
+            .contains_key(&("mod1.rs".to_string(), "mod2.rs".to_string()).into()));
+    }
+
+    #[test]
+    fn test_query_filter_parentheses_precedence() {
+        let mut graph = Graph::new(
+            Grouping::File,
+            Filter {
+                query: Some("source:mod1 AND (item:*foo* OR item:*bar*)".to_string()),
+                ..Default::default()
+            },
+        );
+
+        graph.add("mod1.rs".into(), "mod2.rs".into(), "foo".into());
+        graph.add("mod1.rs".into(), "mod2.rs".into(), "bar".into());
+        graph.add("mod1.rs".into(), "mod2.rs".into(), "baz".into());
+        graph.add("mod3.rs".into(), "mod2.rs".into(), "bar".into());
+
+        graph.apply_filter();
+
+        // Only the mod1->mod2 edge should remain with foo and bar
+        assert_eq!(graph.edges.len(), 1);
+        let items = graph
+            .edges
+            .get(&("mod1.rs".to_string(), "mod2.rs".to_string()).into())
+            .expect("expected filtered edge to exist");
+        assert!(items.contains("foo"));
+        assert!(items.contains("bar"));
+        assert!(!items.contains("baz"));
     }
 }
